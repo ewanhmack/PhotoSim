@@ -146,6 +146,13 @@ FText UViewfinderWidget::GetFocusDistanceText() const
 		return FText::GetEmpty();
 	}
 
+	// The far limit isn't a real distance, it's "as far as the eye can see" - same as turning a
+	// real lens's focus ring all the way to its hard infinity stop.
+	if (OwningCamera->FocalDistance >= OwningCamera->MaxFocusDistance - 1.f)
+	{
+		return FText::FromString(TEXT("∞"));
+	}
+
 	const float Meters = OwningCamera->FocalDistance / 100.f;
 	if (Meters >= 1000.f)
 	{

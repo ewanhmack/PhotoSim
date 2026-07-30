@@ -104,9 +104,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
 	float DefaultFOV;
 
-	/** How much each scroll notch moves the 0-1 zoom level */
+	/** How much one scroll notch changes focal length (mm) - copied from the equipped lens's own ZoomStepMM, see EquipLens */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-	float ZoomStep;
+	float ZoomStepMM;
 
 	/** Assumed sensor width in mm, used to convert focal length to FOV (36mm = full-frame equivalent) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
@@ -177,11 +177,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
 	float FocalDistance;
 
-	/** Closest distance autofocus/manual focus will resolve to */
+	/** Closest distance autofocus/manual focus will resolve to - copied from the equipped lens's own MinFocusDistanceCM, see EquipLens */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
 	float MinFocusDistance;
 
-	/** Farthest distance autofocus/manual focus will resolve to (also the raycast's max range, and the fallback if nothing's hit) */
+	/**
+	 * Farthest distance autofocus/manual focus will resolve to - also the raycast's max range,
+	 * and the fallback if nothing's hit. Not lens-specific (every lens can focus to infinity), so
+	 * unlike MinFocusDistance this is a single shared value, not copied per lens. Reaching it is
+	 * displayed as the infinity symbol in the HUD rather than a distance, same as a real lens's
+	 * focus scale.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
 	float MaxFocusDistance;
 

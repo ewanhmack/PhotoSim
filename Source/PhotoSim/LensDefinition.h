@@ -32,4 +32,22 @@ struct FLensDefinition
 	/** Most zoomed-in end of the zoom range */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
 	float MaxFocalLengthMM = 70.f;
+
+	/**
+	 * How much one scroll notch changes focal length, in mm. Tunable per lens rather than a
+	 * single global step, since a fixed alpha-based step made every lens take the same relative
+	 * number of notches to sweep its own range regardless of how many mm that range actually
+	 * spans - fine for a 10mm-wide lens, but made a 400mm telephoto range feel like it needed a
+	 * lot of scrolling to get anywhere.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	float ZoomStepMM = 5.f;
+
+	/**
+	 * Closest distance this specific lens can focus - real lenses vary a lot here (wide lenses
+	 * often focus much closer than telephotos). The far limit isn't lens-specific: every lens
+	 * can focus to infinity, so that's a single shared constant (UTP_CameraComponent::MaxFocusDistance).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	float MinFocusDistanceCM = 30.f;
 };

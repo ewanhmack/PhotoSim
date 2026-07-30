@@ -38,7 +38,6 @@ UTP_CameraComponent::UTP_CameraComponent()
 	bIsAiming = false;
 	RaiseInterpSpeed = 12.f;
 	DefaultFOV = 90.f;
-	ZoomStep = 0.08f;
 	SensorWidthMM = 36.f; // full-frame equivalent, so "24mm/50mm/200mm" reads the way people expect
 	bRequireViewfinderToShoot = true;
 	PhotoResolution = FIntPoint(640, 360);
@@ -50,8 +49,7 @@ UTP_CameraComponent::UTP_CameraComponent()
 	ApertureStep = 0.2f;
 
 	FocalDistance = 300.f;
-	MinFocusDistance = 30.f;
-	MaxFocusDistance = 50000.f; // 500m - effectively "infinity" for gameplay purposes
+	MaxFocusDistance = 50000.f; // 500m - effectively "infinity"; MinFocusDistance comes from the equipped lens
 	FocusStep = 50.f;
 
 	ShutterSpeed = 125.f;
@@ -102,12 +100,13 @@ UTP_CameraComponent::UTP_CameraComponent()
 	OpenLensInventoryAction = OpenLensInventoryActionAsset.Object;
 
 	// Five lenses spanning wide to super-telephoto. Purely data - tweak or add more in the
-	// Details panel any time, no code changes needed.
-	AvailableLenses.Add({ FText::FromString(TEXT("14-24mm Wide Zoom")), 2.8f, 16.f, 14.f, 24.f });
-	AvailableLenses.Add({ FText::FromString(TEXT("24-70mm Standard Zoom")), 2.8f, 16.f, 24.f, 70.f });
-	AvailableLenses.Add({ FText::FromString(TEXT("50mm Prime")), 1.4f, 16.f, 50.f, 50.f });
-	AvailableLenses.Add({ FText::FromString(TEXT("70-200mm Telephoto")), 2.8f, 22.f, 70.f, 200.f });
-	AvailableLenses.Add({ FText::FromString(TEXT("200-600mm Super-Telephoto")), 4.f, 22.f, 200.f, 600.f });
+	// Details panel any time, no code changes needed. Fields: Name, MinAperture, MaxAperture,
+	// MinFocalLengthMM, MaxFocalLengthMM, ZoomStepMM, MinFocusDistanceCM.
+	AvailableLenses.Add({ FText::FromString(TEXT("14-24mm Wide Zoom")), 2.8f, 16.f, 14.f, 24.f, 1.f, 25.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("24-70mm Standard Zoom")), 2.8f, 16.f, 24.f, 70.f, 4.f, 38.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("50mm Prime")), 1.4f, 16.f, 50.f, 50.f, 1.f, 45.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("70-200mm Telephoto")), 2.8f, 22.f, 70.f, 200.f, 10.f, 100.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("200-600mm Super-Telephoto")), 4.f, 22.f, 200.f, 600.f, 40.f, 200.f });
 	EquipLens(0);
 }
 
@@ -282,8 +281,11 @@ void UTP_CameraComponent::EquipLens(int32 LensIndex)
 	MaxAperture = Lens.MaxAperture;
 	MinFocalLengthMM = Lens.MinFocalLengthMM;
 	MaxFocalLengthMM = Lens.MaxFocalLengthMM;
+	ZoomStepMM = Lens.ZoomStepMM;
+	MinFocusDistance = Lens.MinFocusDistanceCM;
 
 	Aperture = FMath::Clamp(Aperture, MinAperture, MaxAperture);
+	FocalDistance = FMath::Clamp(FocalDistance, MinFocusDistance, MaxFocusDistance);
 	ZoomAlpha = 0.f;
 
 	UE_LOG(LogTemp, Log, TEXT("[Camera] Equipped lens: %s"), *Lens.Name.ToString());
@@ -544,7 +546,16 @@ void UTP_CameraComponent::Input_Zoom(const FInputActionValue& Value)
 	}
 	else
 	{
-		ZoomAlpha = FMath::Clamp(ZoomAlpha + Delta * ZoomStep, 0.f, 1.f);
+		// Step in real mm (ZoomStepMM, tuned per lens) rather than a flat 0-1 alpha step, then
+		// convert back to alpha - otherwise every lens took the same relative number of notches
+		// to sweep its own range regardless of how many mm that range actually spans.
+		const float FocalRange = MaxFocalLengthMM - MinFocalLengthMM;
+		if (FocalRange > KINDA_SMALL_NUMBER)
+		{
+			const float CurrentFocalLength = GetFocalLengthMM();
+			const float NewFocalLength = FMath::Clamp(CurrentFocalLength + Delta * ZoomStepMM, MinFocalLengthMM, MaxFocalLengthMM);
+			ZoomAlpha = (NewFocalLength - MinFocalLengthMM) / FocalRange;
+		}
 	}
 }
 
