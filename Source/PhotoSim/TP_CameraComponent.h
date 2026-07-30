@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "LensDefinition.h"
 #include "TP_CameraComponent.generated.h"
 
 class APhotoSimCharacter;
@@ -11,6 +12,7 @@ class UInputAction;
 class UInputMappingContext;
 class UUserWidget;
 class UCameraShutterWidget;
+class ULensInventoryWidget;
 class UAnimMontage;
 class USoundBase;
 class USceneCaptureComponent2D;
@@ -94,30 +96,54 @@ public:
 	float RaiseInterpSpeed;
 
 	// --- Zoom / FOV tuning ---
+	// Viewfinder FOV is derived from focal length (see GetFOVForFocalLengthMM) rather than
+	// tuned directly, so a lens's focal length range is the single source of truth for both the
+	// mm HUD readout and how far the view actually zooms in.
 
-	/** Player camera FOV when not aiming */
+	/** Player camera FOV when not aiming (no lens framing applies at the hip) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
 	float DefaultFOV;
 
-	/** Player camera FOV the instant the viewfinder is raised (scroll at 0) */
+	/** How much one scroll notch changes focal length (mm) - copied from the equipped lens's own ZoomStepMM, see EquipLens */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-	float ViewfinderFOV;
+	float ZoomStepMM;
 
-	/** Player camera FOV at maximum scroll-in zoom */
+	/** Assumed sensor width in mm, used to convert focal length to FOV (36mm = full-frame equivalent) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-	float MaxZoomFOV;
+	float SensorWidthMM;
 
-	/** How much each scroll notch moves the 0-1 zoom level */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-	float ZoomStep;
-
-	/** Displayed focal length (HUD readout) at zero zoom */
+	/** Widest end of the current lens's zoom range (scroll at 0) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
 	float MinFocalLengthMM;
 
-	/** Displayed focal length (HUD readout) at full zoom */
+	/** Most zoomed-in end of the current lens's zoom range (scroll at max) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
 	float MaxFocalLengthMM;
+
+	/** Converts a focal length (mm) to horizontal FOV (degrees), assuming SensorWidthMM */
+	UFUNCTION(BlueprintPure, Category = "Camera|Zoom")
+	float GetFOVForFocalLengthMM(float FocalLengthMM) const;
+
+	// --- Lenses ---
+
+	/** Every lens the player currently has. Index 0 is equipped by default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Lenses")
+	TArray<FLensDefinition> AvailableLenses;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera|Lenses")
+	int32 EquippedLensIndex;
+
+	/** Swaps to AvailableLenses[LensIndex]: applies its aperture/focal length range, clamps current Aperture into it, resets zoom to 0 */
+	UFUNCTION(BlueprintCallable, Category = "Camera|Lenses")
+	void EquipLens(int32 LensIndex);
+
+	/** Toggles the lens-picker UI. Works any time the camera is equipped, not just while aiming. */
+	UFUNCTION(BlueprintCallable, Category = "Camera|Lenses")
+	void ToggleLensInventory();
+
+	/** Optional widget class for the lens inventory. Defaults to ULensInventoryWidget if left empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Lenses")
+	TSubclassOf<UUserWidget> LensInventoryWidgetClass;
 
 	// --- Exposure ---
 	// Both captures use Manual exposure driven by these rather than auto-exposure: a capture
@@ -139,9 +165,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
 	float ApertureStep;
 
-	/** How far in front of the lens stays in focus - only matters while depth of field is visibly blurring the background */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
+	// --- Focus ---
+	// Continuously autofocused via a centre-frame raycast (see UpdateAutoFocus) unless the Focus
+	// modifier is held, in which case scroll manually pulls focus instead - same hold+scroll
+	// pattern as Aperture/Shutter/ISO. Without this, FocalDistance was a fixed constant that only
+	// matched what was actually in frame by coincidence, which got very obvious on long lenses
+	// (depth of field narrows sharply with focal length, so being focused at the wrong distance
+	// blurs everything).
+
+	/** How far in front of the lens is currently in focus - kept in sync automatically unless manually overridden */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
 	float FocalDistance;
+
+	/** Closest distance autofocus/manual focus will resolve to - copied from the equipped lens's own MinFocusDistanceCM, see EquipLens */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
+	float MinFocusDistance;
+
+	/**
+	 * Farthest distance autofocus/manual focus will resolve to - also the raycast's max range,
+	 * and the fallback if nothing's hit. Not lens-specific (every lens can focus to infinity), so
+	 * unlike MinFocusDistance this is a single shared value, not copied per lens. Reaching it is
+	 * displayed as the infinity symbol in the HUD rather than a distance, same as a real lens's
+	 * focus scale.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
+	float MaxFocusDistance;
+
+	/** How much holding the Focus modifier + one scroll notch changes FocalDistance */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Focus")
+	float FocusStep;
 
 	/** Shutter speed as the denominator of 1/x seconds. Lower = brighter and more motion blur. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
@@ -224,34 +276,49 @@ public:
 	// UInputMappingContext are asset classes that Unreal expects to live in a package, and
 	// runtime-created instances of them (whatever object owns them, whenever they're created)
 	// destabilize editor systems that enumerate objects - this was the cause of several crashes.
+	//
+	// Transient, not EditAnywhere: these are re-resolved by the constructor via ConstructorHelpers
+	// every time, and are never meant to be hand-picked differently per Blueprint instance. Marking
+	// them EditAnywhere let a Blueprint serialize (and freeze) whatever value happened to be
+	// resolved at save time - often None, if the asset didn't exist yet - which then permanently
+	// overrode the constructor's default until manually reset. Transient properties are never
+	// serialized, so there's nothing left for a Blueprint to freeze.
 
 	/** Mapping Context to be used while the camera is equipped */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputMappingContext> CameraMappingContext;
 
 	/** Right-click: toggle the viewfinder */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> AimAction;
 
 	/** Scroll wheel: zoom while aiming */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> ZoomAction;
 
 	/** Left-click: take a photo */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> PhotoAction;
 
 	/** Hold + scroll: adjust Aperture instead of zooming */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> ApertureModifierAction;
 
 	/** Hold + scroll: adjust ShutterSpeed instead of zooming */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> ShutterSpeedModifierAction;
 
 	/** Hold + scroll: adjust ISO instead of zooming */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> ISOModifierAction;
+
+	/** Hold + scroll: manually pull focus instead of zooming; released, autofocus resumes */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> FocusModifierAction;
+
+	/** I: toggle the lens inventory */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> OpenLensInventoryAction;
 
 protected:
 	virtual void BeginPlay() override;
@@ -267,9 +334,15 @@ protected:
 	void Input_ShutterModifierCompleted(const FInputActionValue& Value);
 	void Input_ISOModifierStarted(const FInputActionValue& Value);
 	void Input_ISOModifierCompleted(const FInputActionValue& Value);
+	void Input_FocusModifierStarted(const FInputActionValue& Value);
+	void Input_FocusModifierCompleted(const FInputActionValue& Value);
+	void Input_OpenLensInventory(const FInputActionValue& Value);
 
 	/** Applies Aperture/ShutterSpeed/ISO as a fixed Manual exposure (plus DOF/motion blur/grain) onto a post process settings struct */
 	void ApplyExposureSettings(FPostProcessSettings& PPS) const;
+
+	/** Raycasts from the lens through the centre of frame and sets FocalDistance to the hit distance */
+	void UpdateAutoFocus();
 
 private:
 	UPROPERTY(Transient)
@@ -280,6 +353,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UCameraShutterWidget> ShutterWidgetInstance;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> LensInventoryWidgetInstance;
 
 	/** Created lazily in AttachCamera, attached to the player's first person camera */
 	UPROPERTY(Transient)
@@ -298,4 +374,6 @@ private:
 	bool bApertureModifierHeld = false;
 	bool bShutterSpeedModifierHeld = false;
 	bool bISOModifierHeld = false;
+	bool bFocusModifierHeld = false;
+	bool bIsLensInventoryOpen = false;
 };

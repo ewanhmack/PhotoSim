@@ -29,12 +29,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Pause Menu")
 	TSubclassOf<UPauseMenuWidget> PauseMenuWidgetClass;
 
+	// Transient, not EditAnywhere: re-resolved by the constructor via ConstructorHelpers every
+	// time, so there's nothing for a Blueprint to serialize a stale (e.g. None) override onto.
+
 	/** Mapping Context for the pause toggle. Real asset - see /Game/PhotoSim/Input/. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Pause Menu")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Pause Menu")
 	TObjectPtr<UInputMappingContext> PauseMappingContext;
 
 	/** Pause toggle action. Real asset - see /Game/PhotoSim/Input/. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Pause Menu")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Pause Menu")
 	TObjectPtr<UInputAction> PauseAction;
 
 public:
