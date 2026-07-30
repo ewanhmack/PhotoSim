@@ -139,6 +139,102 @@ FText UViewfinderWidget::GetISOText() const
 	return FText::FromString(FString::Printf(TEXT("ISO %d"), FMath::RoundToInt(ISO)));
 }
 
+FText UViewfinderWidget::GetFocusDistanceText() const
+{
+	if (!OwningCamera.IsValid())
+	{
+		return FText::GetEmpty();
+	}
+
+	const float Meters = OwningCamera->FocalDistance / 100.f;
+	if (Meters >= 1000.f)
+	{
+		return FText::FromString(FString::Printf(TEXT("%.1fkm"), Meters / 1000.f));
+	}
+	if (Meters >= 10.f)
+	{
+		return FText::FromString(FString::Printf(TEXT("%.0fm"), Meters));
+	}
+	return FText::FromString(FString::Printf(TEXT("%.1fm"), Meters));
+}
+
+float UViewfinderWidget::GetFocusFraction() const
+{
+	if (!OwningCamera.IsValid())
+	{
+		return 0.f;
+	}
+
+	// Log-scaled, like a real lens's focus distance markings, since near distances matter
+	// proportionally more than far ones - a linear scale would sit pinned near the far end always.
+	const float Min = FMath::Max(OwningCamera->MinFocusDistance, 1.f);
+	const float Max = FMath::Max(OwningCamera->MaxFocusDistance, Min + 1.f);
+	const float Current = FMath::Clamp(OwningCamera->FocalDistance, Min, Max);
+
+	const float LogMin = FMath::Loge(Min);
+	const float LogMax = FMath::Loge(Max);
+	const float LogCurrent = FMath::Loge(Current);
+
+	return (LogCurrent - LogMin) / FMath::Max(LogMax - LogMin, KINDA_SMALL_NUMBER);
+}
+
+FMargin UViewfinderWidget::GetFocusMarkerPadding() const
+{
+	const float BarWidth = 160.f;
+	const float MarkerWidth = 3.f;
+	const float Offset = GetFocusFraction() * (BarWidth - MarkerWidth);
+	return FMargin(Offset, 0.f, 0.f, 0.f);
+}
+
+TSharedRef<SWidget> UViewfinderWidget::MakeFocusBar() const
+{
+	const float BarWidth = 160.f;
+	const float BarHeight = 4.f;
+	const float MarkerWidth = 3.f;
+	const float MarkerHeight = 14.f;
+
+	return SNew(SVerticalBox)
+
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 0.f, 0.f, 4.f)
+		[
+			SNew(STextBlock)
+			.Text_UObject(this, &UViewfinderWidget::GetFocusDistanceText)
+			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 13))
+			.ColorAndOpacity(FLinearColor(0.1f, 1.f, 0.2f, 0.95f))
+		]
+
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+		[
+			SNew(SBox)
+			.WidthOverride(BarWidth)
+			.HeightOverride(MarkerHeight)
+			[
+				SNew(SOverlay)
+
+				+ SOverlay::Slot().VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.HeightOverride(BarHeight)
+					[
+						MakeFlatColorBox(FLinearColor(1.f, 1.f, 1.f, 0.3f))
+					]
+				]
+
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Left)
+				.Padding(TAttribute<FMargin>::CreateLambda([this]() { return GetFocusMarkerPadding(); }))
+				[
+					SNew(SBox)
+					.WidthOverride(MarkerWidth)
+					.HeightOverride(MarkerHeight)
+					[
+						MakeFlatColorBox(FLinearColor(0.1f, 1.f, 0.2f, 1.f))
+					]
+				]
+			]
+		];
+}
+
 TSharedRef<SWidget> UViewfinderWidget::MakeExposureReadout() const
 {
 	const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Bold", 14);
@@ -214,5 +310,14 @@ TSharedRef<SWidget> UViewfinderWidget::RebuildWidget()
 		.Padding(FMargin(0.f, 0.f, 16.f, 34.f))
 		[
 			MakeExposureReadout()
+		]
+
+		// Focal range bar - shows current focus distance; autofocus unless holding F + scroll
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Bottom)
+		.Padding(FMargin(0.f, 0.f, 0.f, 72.f))
+		[
+			MakeFocusBar()
 		];
 }

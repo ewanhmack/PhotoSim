@@ -28,11 +28,18 @@ protected:
 private:
 	TSharedRef<SWidget> MakeRuleOfThirdsGrid() const;
 	TSharedRef<SWidget> MakeExposureReadout() const;
+	TSharedRef<SWidget> MakeFocusBar() const;
 
 	FText GetFocalLengthText() const;
 	FText GetApertureText() const;
 	FText GetShutterSpeedText() const;
 	FText GetISOText() const;
+	FText GetFocusDistanceText() const;
+
+	/** 0-1 position of the current focus distance along the (log-scaled) min/max focus range */
+	float GetFocusFraction() const;
+	/** Left padding, in pixels, that positions the focus bar's marker inside its fixed-width track */
+	FMargin GetFocusMarkerPadding() const;
 
 	TWeakObjectPtr<UTP_CameraComponent> OwningCamera;
 };

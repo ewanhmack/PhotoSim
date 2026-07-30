@@ -47,8 +47,10 @@ protected:
 	/**
 	 * Base material for the rear screen. Must expose a Texture Parameter named "ScreenTexture"
 	 * driving Emissive Color (Unlit, Opaque). Loaded from /Game/PhotoSim/Materials/M_CameraScreen.
+	 * Transient, not EditDefaultsOnly - re-resolved by the constructor via ConstructorHelpers
+	 * every time, so a Blueprint can never freeze a stale (e.g. None) override onto it.
 	 */
-	UPROPERTY(EditDefaultsOnly, Category = "Camera|Materials")
+	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInterface> ScreenMaterialBase;
 
 	UFUNCTION()

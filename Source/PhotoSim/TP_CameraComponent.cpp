@@ -4,6 +4,7 @@
 #include "PhotoSimCharacter.h"
 #include "ViewfinderWidget.h"
 #include "CameraShutterWidget.h"
+#include "LensInventoryWidget.h"
 #include "PhotoLibrarySubsystem.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
@@ -24,6 +25,8 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Engine/World.h"
+#include "Engine/EngineTypes.h"
 
 UTP_CameraComponent::UTP_CameraComponent()
 	: Character(nullptr)
@@ -35,11 +38,8 @@ UTP_CameraComponent::UTP_CameraComponent()
 	bIsAiming = false;
 	RaiseInterpSpeed = 12.f;
 	DefaultFOV = 90.f;
-	ViewfinderFOV = 65.f;
-	MaxZoomFOV = 20.f;
 	ZoomStep = 0.08f;
-	MinFocalLengthMM = 24.f;
-	MaxFocalLengthMM = 135.f;
+	SensorWidthMM = 36.f; // full-frame equivalent, so "24mm/50mm/200mm" reads the way people expect
 	bRequireViewfinderToShoot = true;
 	PhotoResolution = FIntPoint(640, 360);
 
@@ -48,7 +48,11 @@ UTP_CameraComponent::UTP_CameraComponent()
 	MinAperture = 1.4f;
 	MaxAperture = 16.f;
 	ApertureStep = 0.2f;
+
 	FocalDistance = 300.f;
+	MinFocusDistance = 30.f;
+	MaxFocusDistance = 50000.f; // 500m - effectively "infinity" for gameplay purposes
+	FocusStep = 50.f;
 
 	ShutterSpeed = 125.f;
 	MinShutterSpeed = 15.f;
@@ -84,6 +88,8 @@ UTP_CameraComponent::UTP_CameraComponent()
 	static ConstructorHelpers::FObjectFinder<UInputAction> ApertureModifierActionAsset(TEXT("/Game/PhotoSim/Input/IA_ApertureModifier.IA_ApertureModifier"));
 	static ConstructorHelpers::FObjectFinder<UInputAction> ShutterSpeedModifierActionAsset(TEXT("/Game/PhotoSim/Input/IA_ShutterModifier.IA_ShutterModifier"));
 	static ConstructorHelpers::FObjectFinder<UInputAction> ISOModifierActionAsset(TEXT("/Game/PhotoSim/Input/IA_ISOModifier.IA_ISOModifier"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> FocusModifierActionAsset(TEXT("/Game/PhotoSim/Input/IA_FocusModifier.IA_FocusModifier"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> OpenLensInventoryActionAsset(TEXT("/Game/PhotoSim/Input/IA_OpenLensInventory.IA_OpenLensInventory"));
 
 	AimAction = AimActionAsset.Object;
 	ZoomAction = ZoomActionAsset.Object;
@@ -92,6 +98,17 @@ UTP_CameraComponent::UTP_CameraComponent()
 	ApertureModifierAction = ApertureModifierActionAsset.Object;
 	ShutterSpeedModifierAction = ShutterSpeedModifierActionAsset.Object;
 	ISOModifierAction = ISOModifierActionAsset.Object;
+	FocusModifierAction = FocusModifierActionAsset.Object;
+	OpenLensInventoryAction = OpenLensInventoryActionAsset.Object;
+
+	// Five lenses spanning wide to super-telephoto. Purely data - tweak or add more in the
+	// Details panel any time, no code changes needed.
+	AvailableLenses.Add({ FText::FromString(TEXT("14-24mm Wide Zoom")), 2.8f, 16.f, 14.f, 24.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("24-70mm Standard Zoom")), 2.8f, 16.f, 24.f, 70.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("50mm Prime")), 1.4f, 16.f, 50.f, 50.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("70-200mm Telephoto")), 2.8f, 22.f, 70.f, 200.f });
+	AvailableLenses.Add({ FText::FromString(TEXT("200-600mm Super-Telephoto")), 4.f, 22.f, 200.f, 600.f });
+	EquipLens(0);
 }
 
 void UTP_CameraComponent::BeginPlay()
@@ -147,6 +164,9 @@ bool UTP_CameraComponent::AttachCamera(APhotoSimCharacter* TargetCharacter)
 			EnhancedInputComponent->BindAction(ShutterSpeedModifierAction, ETriggerEvent::Completed, this, &UTP_CameraComponent::Input_ShutterModifierCompleted);
 			EnhancedInputComponent->BindAction(ISOModifierAction, ETriggerEvent::Started, this, &UTP_CameraComponent::Input_ISOModifierStarted);
 			EnhancedInputComponent->BindAction(ISOModifierAction, ETriggerEvent::Completed, this, &UTP_CameraComponent::Input_ISOModifierCompleted);
+			EnhancedInputComponent->BindAction(FocusModifierAction, ETriggerEvent::Started, this, &UTP_CameraComponent::Input_FocusModifierStarted);
+			EnhancedInputComponent->BindAction(FocusModifierAction, ETriggerEvent::Completed, this, &UTP_CameraComponent::Input_FocusModifierCompleted);
+			EnhancedInputComponent->BindAction(OpenLensInventoryAction, ETriggerEvent::Started, this, &UTP_CameraComponent::Input_OpenLensInventory);
 		}
 	}
 
@@ -189,7 +209,7 @@ void UTP_CameraComponent::SetupLiveViewScreen(UStaticMeshComponent* InScreenMesh
 	LensCapture->bCaptureEveryFrame = true;
 	LensCapture->bCaptureOnMovement = false;
 	LensCapture->CaptureSource = SCS_FinalColorLDR;
-	LensCapture->FOVAngle = ViewfinderFOV;
+	LensCapture->FOVAngle = GetFOVForFocalLengthMM(GetFocalLengthMM());
 	LensCapture->PostProcessBlendWeight = 1.f;
 	ApplyExposureSettings(LensCapture->PostProcessSettings);
 	LensCapture->RegisterComponent();
@@ -238,6 +258,90 @@ void UTP_CameraComponent::ToggleViewfinder()
 	{
 		ViewfinderWidgetInstance->RemoveFromParent();
 		ViewfinderWidgetInstance = nullptr;
+	}
+}
+
+float UTP_CameraComponent::GetFOVForFocalLengthMM(float FocalLengthMM) const
+{
+	const float HalfSensor = SensorWidthMM * 0.5f;
+	const float HalfFOVRadians = FMath::Atan(HalfSensor / FMath::Max(FocalLengthMM, 1.f));
+	return FMath::RadiansToDegrees(HalfFOVRadians) * 2.f;
+}
+
+void UTP_CameraComponent::EquipLens(int32 LensIndex)
+{
+	if (!AvailableLenses.IsValidIndex(LensIndex))
+	{
+		return;
+	}
+
+	EquippedLensIndex = LensIndex;
+	const FLensDefinition& Lens = AvailableLenses[LensIndex];
+
+	MinAperture = Lens.MinAperture;
+	MaxAperture = Lens.MaxAperture;
+	MinFocalLengthMM = Lens.MinFocalLengthMM;
+	MaxFocalLengthMM = Lens.MaxFocalLengthMM;
+
+	Aperture = FMath::Clamp(Aperture, MinAperture, MaxAperture);
+	ZoomAlpha = 0.f;
+
+	UE_LOG(LogTemp, Log, TEXT("[Camera] Equipped lens: %s"), *Lens.Name.ToString());
+}
+
+void UTP_CameraComponent::ToggleLensInventory()
+{
+	if (Character == nullptr)
+	{
+		return;
+	}
+
+	APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
+	if (PlayerController == nullptr)
+	{
+		return;
+	}
+
+	// Can't sensibly browse lenses while looking through the viewfinder - close it first.
+	if (!bIsLensInventoryOpen && bIsAiming)
+	{
+		ToggleViewfinder();
+	}
+
+	bIsLensInventoryOpen = !bIsLensInventoryOpen;
+
+	if (bIsLensInventoryOpen)
+	{
+		TSubclassOf<UUserWidget> WidgetClass = LensInventoryWidgetClass;
+		if (WidgetClass == nullptr)
+		{
+			WidgetClass = ULensInventoryWidget::StaticClass();
+		}
+
+		if (LensInventoryWidgetInstance == nullptr)
+		{
+			LensInventoryWidgetInstance = CreateWidget<UUserWidget>(PlayerController, WidgetClass);
+			if (ULensInventoryWidget* LensInventory = Cast<ULensInventoryWidget>(LensInventoryWidgetInstance))
+			{
+				LensInventory->SetOwningCamera(this);
+			}
+		}
+
+		if (LensInventoryWidgetInstance != nullptr)
+		{
+			LensInventoryWidgetInstance->AddToViewport(150);
+			PlayerController->SetShowMouseCursor(true);
+			PlayerController->SetInputMode(FInputModeUIOnly().SetWidgetToFocus(LensInventoryWidgetInstance->TakeWidget()).SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock));
+		}
+	}
+	else
+	{
+		if (LensInventoryWidgetInstance != nullptr)
+		{
+			LensInventoryWidgetInstance->RemoveFromParent();
+		}
+		PlayerController->SetShowMouseCursor(false);
+		PlayerController->SetInputMode(FInputModeGameOnly());
 	}
 }
 
@@ -340,9 +444,16 @@ void UTP_CameraComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 	const FQuat NewRotation = FQuat::Slerp(GetRelativeRotation().Quaternion(), TargetPose.GetRotation(), RotationAlpha);
 	SetRelativeLocationAndRotation(NewLocation, NewRotation);
 
+	// Autofocus tracks whatever's centred in frame, unless the player is manually pulling focus
+	// (holding the Focus modifier), in which case Input_Zoom is driving FocalDistance instead.
+	if (!bFocusModifierHeld)
+	{
+		UpdateAutoFocus();
+	}
+
 	if (UCameraComponent* PlayerCamera = Character->GetFirstPersonCameraComponent())
 	{
-		const float TargetFOV = bIsAiming ? FMath::Lerp(ViewfinderFOV, MaxZoomFOV, ZoomAlpha) : DefaultFOV;
+		const float TargetFOV = bIsAiming ? GetFOVForFocalLengthMM(GetFocalLengthMM()) : DefaultFOV;
 		PlayerCamera->FieldOfView = FMath::FInterpTo(PlayerCamera->FieldOfView, TargetFOV, DeltaTime, RaiseInterpSpeed);
 
 		// Preview the exposure/DOF/motion-blur/grain effect live in the actual game view while
@@ -361,6 +472,7 @@ void UTP_CameraComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 
 	if (LensCapture != nullptr)
 	{
+		LensCapture->FOVAngle = GetFOVForFocalLengthMM(GetFocalLengthMM());
 		ApplyExposureSettings(LensCapture->PostProcessSettings);
 	}
 }
@@ -377,6 +489,12 @@ void UTP_CameraComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		ShutterWidgetInstance->RemoveFromParent();
 		ShutterWidgetInstance = nullptr;
+	}
+
+	if (LensInventoryWidgetInstance != nullptr)
+	{
+		LensInventoryWidgetInstance->RemoveFromParent();
+		LensInventoryWidgetInstance = nullptr;
 	}
 
 	if (Character != nullptr)
@@ -420,6 +538,10 @@ void UTP_CameraComponent::Input_Zoom(const FInputActionValue& Value)
 	{
 		ISO = FMath::Clamp(ISO + Delta * ISOStep, MinISO, MaxISO);
 	}
+	else if (bFocusModifierHeld)
+	{
+		FocalDistance = FMath::Clamp(FocalDistance + Delta * FocusStep, MinFocusDistance, MaxFocusDistance);
+	}
 	else
 	{
 		ZoomAlpha = FMath::Clamp(ZoomAlpha + Delta * ZoomStep, 0.f, 1.f);
@@ -461,6 +583,23 @@ void UTP_CameraComponent::Input_ISOModifierCompleted(const FInputActionValue& Va
 	bISOModifierHeld = false;
 }
 
+void UTP_CameraComponent::Input_FocusModifierStarted(const FInputActionValue& Value)
+{
+	bFocusModifierHeld = true;
+	UE_LOG(LogTemp, Log, TEXT("[Camera] Focus modifier held (manual focus)"));
+}
+
+void UTP_CameraComponent::Input_FocusModifierCompleted(const FInputActionValue& Value)
+{
+	bFocusModifierHeld = false;
+	UE_LOG(LogTemp, Log, TEXT("[Camera] Focus modifier released (autofocus resumed)"));
+}
+
+void UTP_CameraComponent::Input_OpenLensInventory(const FInputActionValue& Value)
+{
+	ToggleLensInventory();
+}
+
 void UTP_CameraComponent::ApplyExposureSettings(FPostProcessSettings& PPS) const
 {
 	// Brightness - Manual mode computes exposure from ISO/ShutterSpeed/Aperture like a real
@@ -497,4 +636,34 @@ void UTP_CameraComponent::ApplyExposureSettings(FPostProcessSettings& PPS) const
 		FVector2D(MinISO, MaxISO), FVector2D(0.f, MaxFilmGrainIntensity), ISO);
 	PPS.bOverride_FilmGrainIntensity = true;
 	PPS.FilmGrainIntensity = FilmGrain;
+}
+
+void UTP_CameraComponent::UpdateAutoFocus()
+{
+	if (Character == nullptr)
+	{
+		return;
+	}
+
+	UCameraComponent* PlayerCamera = Character->GetFirstPersonCameraComponent();
+	if (PlayerCamera == nullptr)
+	{
+		return;
+	}
+
+	const FVector Start = PlayerCamera->GetComponentLocation();
+	const FVector End = Start + PlayerCamera->GetForwardVector() * MaxFocusDistance;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(Character);
+
+	FHitResult Hit;
+	if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, QueryParams))
+	{
+		FocalDistance = FMath::Clamp(FVector::Dist(Start, Hit.ImpactPoint), MinFocusDistance, MaxFocusDistance);
+	}
+	else
+	{
+		FocalDistance = MaxFocusDistance;
+	}
 }
