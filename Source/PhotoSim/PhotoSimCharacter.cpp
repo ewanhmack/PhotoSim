@@ -6,6 +6,7 @@
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -36,6 +37,11 @@ APhotoSimCharacter::APhotoSimCharacter()
 	//Mesh1P->SetRelativeRotation(FRotator(0.9f, -19.19f, 5.2f));
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
 
+	// Crouch/sprint - CrouchSpeed/WalkSpeed default member initializers have already run by this
+	// point (declaration order runs before the constructor body), so it's safe to read them here.
+	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
 }
 
 void APhotoSimCharacter::BeginPlay()
@@ -60,6 +66,13 @@ void APhotoSimCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &APhotoSimCharacter::Look);
+
+		// Crouching (toggle)
+		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Started, this, &APhotoSimCharacter::ToggleCrouch);
+
+		// Sprinting (hold)
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &APhotoSimCharacter::StartSprint);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &APhotoSimCharacter::StopSprint);
 	}
 	else
 	{
@@ -91,5 +104,53 @@ void APhotoSimCharacter::Look(const FInputActionValue& Value)
 		// add yaw and pitch input to controller
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
+	}
+}
+
+void APhotoSimCharacter::ToggleCrouch(const FInputActionValue& Value)
+{
+	UE_LOG(LogTemplateCharacter, Log, TEXT("ToggleCrouch fired. bIsCrouched=%d CanCrouch=%d NavAgentProps.bCanCrouch=%d"),
+		bIsCrouched, CanCrouch(), GetCharacterMovement()->NavAgentProps.bCanCrouch);
+
+	if (bIsCrouched)
+	{
+		UnCrouch();
+	}
+	else
+	{
+		Crouch();
+	}
+}
+
+void APhotoSimCharacter::StartSprint(const FInputActionValue& Value)
+{
+	// Deliberately doesn't check crouch state: UCharacterMovementComponent::GetMaxSpeed() always
+	// uses MaxWalkSpeedCrouched instead of MaxWalkSpeed while crouched, so this can't make the
+	// player crouch-sprint even though it unconditionally sets MaxWalkSpeed.
+	GetCharacterMovement()->MaxWalkSpeed = SprintSpeed;
+}
+
+void APhotoSimCharacter::StopSprint(const FInputActionValue& Value)
+{
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+}
+
+void APhotoSimCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	if (FirstPersonCameraComponent != nullptr)
+	{
+		FirstPersonCameraComponent->AddLocalOffset(FVector(0.f, 0.f, -ScaledHalfHeightAdjust));
+	}
+}
+
+void APhotoSimCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	if (FirstPersonCameraComponent != nullptr)
+	{
+		FirstPersonCameraComponent->AddLocalOffset(FVector(0.f, 0.f, ScaledHalfHeightAdjust));
 	}
 }

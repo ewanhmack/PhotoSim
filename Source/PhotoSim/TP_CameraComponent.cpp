@@ -27,6 +27,10 @@
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
+#include "ImageUtils.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+#include "Misc/DateTime.h"
 
 UTP_CameraComponent::UTP_CameraComponent()
 	: Character(nullptr)
@@ -181,6 +185,12 @@ bool UTP_CameraComponent::AttachCamera(APhotoSimCharacter* TargetCharacter)
 			PhotoCapture->SetupAttachment(PlayerCamera);
 			PhotoCapture->bCaptureEveryFrame = false;
 			PhotoCapture->bCaptureOnMovement = false;
+			// Without this, the capture's view state (Lumen GI accumulation, TAA history) is torn
+			// down after every one-shot CaptureScene(), so each photo renders with zero history -
+			// indirectly-lit areas (anything not hit by direct light) read back crushed to black
+			// even though the same view looks correctly exposed in the continuously-rendering
+			// viewfinder/LCD feed.
+			PhotoCapture->bAlwaysPersistRenderingState = true;
 			PhotoCapture->CaptureSource = SCS_FinalColorLDR;
 			PhotoCapture->PostProcessBlendWeight = 1.f;
 			ApplyExposureSettings(PhotoCapture->PostProcessSettings);
@@ -215,7 +225,7 @@ void UTP_CameraComponent::SetupLiveViewScreen(UStaticMeshComponent* InScreenMesh
 
 	// Kept small - this renders every frame while the camera is equipped.
 	LiveViewTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage());
-	LiveViewTarget->RenderTargetFormat = RTF_RGBA8;
+	LiveViewTarget->RenderTargetFormat = RTF_RGBA8_SRGB;
 	LiveViewTarget->InitAutoFormat(256, 144);
 	LiveViewTarget->UpdateResourceImmediate(true);
 	LensCapture->TextureTarget = LiveViewTarget;
@@ -412,7 +422,11 @@ void UTP_CameraComponent::TakePhoto()
 		ApplyExposureSettings(PhotoCapture->PostProcessSettings);
 
 		UTextureRenderTarget2D* Snapshot = NewObject<UTextureRenderTarget2D>(GetTransientPackage());
-		Snapshot->RenderTargetFormat = RTF_RGBA8;
+		// SCS_FinalColorLDR is already gamma-encoded, display-ready colour. Plain RTF_RGBA8 stores
+		// it as if it were linear, so Slate's UI compositing re-applies gamma on top of gamma when
+		// showing it in the gallery, crushing shadows/midtones far more than highlights (the sky
+		// looks fine, everything shadowed goes black). RTF_RGBA8_SRGB flags the resource correctly.
+		Snapshot->RenderTargetFormat = RTF_RGBA8_SRGB;
 		Snapshot->InitAutoFormat(PhotoResolution.X, PhotoResolution.Y);
 		Snapshot->UpdateResourceImmediate(true);
 
@@ -426,9 +440,21 @@ void UTP_CameraComponent::TakePhoto()
 				Library->AddPhoto(Snapshot);
 			}
 		}
-	}
 
-	PlayerController->ConsoleCommand(TEXT("HighResShot 1"), true);
+		// Save the exact same capture that's shown in the in-game gallery out to disk, rather than
+		// using HighResShot (which re-renders the viewport through a separate path with its own
+		// global state and had come out with drastically different exposure).
+		const FString PhotoDir = FPaths::ProjectSavedDir() / TEXT("Photos");
+		IFileManager::Get().MakeDirectory(*PhotoDir, true);
+		const FString FilePath = PhotoDir / FString::Printf(TEXT("Photo_%s.png"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+
+		if (FArchive* FileWriter = IFileManager::Get().CreateFileWriter(*FilePath))
+		{
+			FImageUtils::ExportRenderTarget2DAsPNG(Snapshot, *FileWriter);
+			FileWriter->Close();
+			delete FileWriter;
+		}
+	}
 }
 
 void UTP_CameraComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
