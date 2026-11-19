@@ -103,7 +103,7 @@ TSharedRef<SWidget> UPauseMenuWidget::RebuildWidget()
 				+ SScrollBox::Slot()
 				[
 					SAssignNew(GalleryWrapBox, SWrapBox)
-					.UseAllottedWidth(true)
+					.UseAllottedSize(true)
 					.InnerSlotPadding(FVector2D(6.f, 6.f))
 				]
 			]
