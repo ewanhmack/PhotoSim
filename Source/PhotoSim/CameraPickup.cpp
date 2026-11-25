@@ -68,6 +68,21 @@ ACameraPickup::ACameraPickup()
 	Screen->SetRelativeScale3D(FVector(0.02f, 0.05f, 0.04f));
 }
 
+void ACameraPickup::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (!BodyDefinition.OverrideMesh.IsNull() && Body != nullptr)
+	{
+		if (UStaticMesh* const OverrideMesh = BodyDefinition.OverrideMesh.LoadSynchronous())
+		{
+			// Mesh only - never touches Body's Transform, so whatever Scale/Location/Rotation is
+			// hand-tuned on Body in the Blueprint editor is what actually shows up in-game.
+			Body->SetStaticMesh(OverrideMesh);
+		}
+	}
+}
+
 void ACameraPickup::HandlePickUp(APhotoSimCharacter* PickUpCharacter)
 {
 	if (CameraComponent == nullptr || PickUpCharacter == nullptr || !CameraComponent->AttachCamera(PickUpCharacter))
@@ -90,5 +105,8 @@ void ACameraPickup::HandlePickUp(APhotoSimCharacter* PickUpCharacter)
 
 	CameraComponent->SetupLiveViewScreen(Screen, ScreenMaterialBase);
 
+	CameraComponent->ConfigureFromBodyDefinition(BodyDefinition);
+
+	PickupTrigger->ConsumePickup();
 	Destroy();
 }

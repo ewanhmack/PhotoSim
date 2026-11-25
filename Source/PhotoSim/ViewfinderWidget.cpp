@@ -6,18 +6,13 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Styling/CoreStyle.h"
+#include "WidgetHelpers.h"
 
 namespace
 {
-	TSharedRef<SWidget> MakeFlatColorBox(const FLinearColor& Color)
-	{
-		return SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(Color);
-	}
-
 	/** An L-shaped corner bracket: a bar along the vertical edge, a bar along the horizontal edge. */
 	TSharedRef<SWidget> MakeCornerBracket(EHorizontalAlignment HAlign, EVerticalAlignment VAlign)
 	{
@@ -53,20 +48,78 @@ namespace
 			];
 	}
 
-	TSharedRef<SWidget> MakeLetterboxBar(EVerticalAlignment VAlign)
-	{
-		return SNew(SBox)
-			.HeightOverride(24.f)
-			.VAlign(VAlign)
-			[
-				MakeFlatColorBox(FLinearColor::Black)
-			];
-	}
+	// How far past each edge of the screen the rotation mask extends (see MakeRotationMask) - needs
+	// to stay wide enough that rotating it by any realistic roll angle still leaves every screen
+	// corner covered by black rather than exposing the mask's own far edge.
+	constexpr float MaskExtent = 2000.f;
 }
 
 void UViewfinderWidget::SetOwningCamera(UTP_CameraComponent* InCamera)
 {
 	OwningCamera = InCamera;
+}
+
+void UViewfinderWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	// The geometry Slate hands this widget this tick is the one authoritative size for the frame
+	// and the mask's hole to agree on - see CachedViewportSize's comment.
+	CachedViewportSize = MyGeometry.GetLocalSize();
+
+	// Temporary diagnostic for the frame/mask mismatch bug - remove once that's closed.
+	if (GFrameCounter % 90 == 0)
+	{
+		const float Scale = GetFrameScale();
+		UE_LOG(LogTemp, Warning, TEXT("[ViewfinderDiag] CachedViewportSize=(%.1f,%.1f) Scale=%.3f FrameSize=(%.1f,%.1f) MaskOuterSize=(%.1f,%.1f) Roll=%.1f"),
+			CachedViewportSize.X, CachedViewportSize.Y, Scale,
+			GetFrameWidth().Get(), GetFrameHeight().Get(),
+			GetMaskOuterWidth().Get(), GetMaskOuterHeight().Get(),
+			OwningCamera.IsValid() ? OwningCamera->GetRollDegrees() : -1.f);
+	}
+}
+
+TOptional<FSlateRenderTransform> UViewfinderWidget::GetFrameRenderTransform() const
+{
+	const float RollDegrees = OwningCamera.IsValid() ? OwningCamera->GetRollDegrees() : 0.f;
+	return FSlateRenderTransform(FQuat2D(FMath::DegreesToRadians(RollDegrees)));
+}
+
+float UViewfinderWidget::GetFrameScale() const
+{
+	const float RollDegrees = OwningCamera.IsValid() ? OwningCamera->GetRollDegrees() : 0.f;
+	const float CosTheta = FMath::Abs(FMath::Cos(FMath::DegreesToRadians(RollDegrees)));
+	const float SinTheta = FMath::Abs(FMath::Sin(FMath::DegreesToRadians(RollDegrees)));
+
+	const float W = CachedViewportSize.X;
+	const float H = CachedViewportSize.Y;
+
+	// The largest scale that keeps a screen-shaped WxH rectangle, rotated by RollDegrees, entirely
+	// within the WxH screen - the classic "largest rotated rectangle inscribed in a rectangle"
+	// problem. Whichever axis would overflow first (width or height) is the one that binds.
+	const float ScaleForWidth = W / (W * CosTheta + H * SinTheta);
+	const float ScaleForHeight = H / (H * CosTheta + W * SinTheta);
+	return FMath::Min(ScaleForWidth, ScaleForHeight);
+}
+
+FOptionalSize UViewfinderWidget::GetFrameWidth() const
+{
+	return FOptionalSize(CachedViewportSize.X * GetFrameScale());
+}
+
+FOptionalSize UViewfinderWidget::GetFrameHeight() const
+{
+	return FOptionalSize(CachedViewportSize.Y * GetFrameScale());
+}
+
+FOptionalSize UViewfinderWidget::GetMaskOuterWidth() const
+{
+	return FOptionalSize(GetFrameWidth().Get() + MaskExtent * 2.f);
+}
+
+FOptionalSize UViewfinderWidget::GetMaskOuterHeight() const
+{
+	return FOptionalSize(GetFrameHeight().Get() + MaskExtent * 2.f);
 }
 
 TSharedRef<SWidget> UViewfinderWidget::MakeRuleOfThirdsGrid() const
@@ -163,6 +216,11 @@ FText UViewfinderWidget::GetFocusDistanceText() const
 		return FText::FromString(FString::Printf(TEXT("%.0fm"), Meters));
 	}
 	return FText::FromString(FString::Printf(TEXT("%.1fm"), Meters));
+}
+
+FText UViewfinderWidget::GetExposureModeText() const
+{
+	return OwningCamera.IsValid() ? OwningCamera->GetExposureModeDisplayText() : FText::GetEmpty();
 }
 
 float UViewfinderWidget::GetFocusFraction() const
@@ -265,13 +323,9 @@ TSharedRef<SWidget> UViewfinderWidget::MakeExposureReadout() const
 		];
 }
 
-TSharedRef<SWidget> UViewfinderWidget::RebuildWidget()
+TSharedRef<SWidget> UViewfinderWidget::MakeFramingGuides() const
 {
 	return SNew(SOverlay)
-
-		// Top / bottom viewfinder edge bars
-		+ SOverlay::Slot().VAlign(VAlign_Top)[ MakeLetterboxBar(VAlign_Top) ]
-		+ SOverlay::Slot().VAlign(VAlign_Bottom)[ MakeLetterboxBar(VAlign_Bottom) ]
 
 		// Rule of thirds composition grid
 		+ SOverlay::Slot().Padding(FMargin(0.f, 24.f))
@@ -295,6 +349,106 @@ TSharedRef<SWidget> UViewfinderWidget::RebuildWidget()
 			.HeightOverride(24.f)
 			[
 				MakeFlatColorBox(FLinearColor(1.f, 1.f, 1.f, 0.6f))
+			]
+		];
+}
+
+TSharedRef<SWidget> UViewfinderWidget::MakeFrame() const
+{
+	// A thin outline, not a filled SBorder - SBorder's BorderBackgroundColor tints its whole
+	// interior (fine for the gallery, where a photo image covers it completely), which here would
+	// paint the entire frame opaque instead of leaving it transparent to the live scene behind it.
+	const float BorderThickness = 2.f;
+	const FLinearColor BorderColor = FLinearColor(1.f, 1.f, 1.f, 0.6f);
+
+	return SNew(SOverlay)
+		+ SOverlay::Slot().VAlign(VAlign_Top)[ SNew(SBox).HeightOverride(BorderThickness)[ MakeFlatColorBox(BorderColor) ] ]
+		+ SOverlay::Slot().VAlign(VAlign_Bottom)[ SNew(SBox).HeightOverride(BorderThickness)[ MakeFlatColorBox(BorderColor) ] ]
+		+ SOverlay::Slot().HAlign(HAlign_Left)[ SNew(SBox).WidthOverride(BorderThickness)[ MakeFlatColorBox(BorderColor) ] ]
+		+ SOverlay::Slot().HAlign(HAlign_Right)[ SNew(SBox).WidthOverride(BorderThickness)[ MakeFlatColorBox(BorderColor) ] ]
+		+ SOverlay::Slot()[ MakeFramingGuides() ];
+}
+
+TSharedRef<SWidget> UViewfinderWidget::MakeRotationMask() const
+{
+	// A nine-patch: four MaskExtent-square black corners, four black edge bars filling the rest of
+	// each side, and a transparent centre the exact size of the (shrink-to-fit) frame. Built
+	// oversized - frame size plus MaskExtent on every side - and centred, so once this whole mask
+	// rotates with the frame (see RebuildWidget), its far edges still fall outside the screen -
+	// it's the explicit corner squares that actually guarantee no gap opens up at the screen's own
+	// corners, not the overlap between adjacent bars, which is why this needs four corners rather
+	// than just four bars.
+	auto MakeCorner = [] { return SNew(SBox).WidthOverride(MaskExtent).HeightOverride(MaskExtent)[ MakeFlatColorBox(FLinearColor::Black) ]; };
+
+	return SNew(SBox)
+		.WidthOverride_UObject(this, &UViewfinderWidget::GetMaskOuterWidth)
+		.HeightOverride_UObject(this, &UViewfinderWidget::GetMaskOuterHeight)
+		[
+			SNew(SVerticalBox)
+
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()[ MakeCorner() ]
+				+ SHorizontalBox::Slot().FillWidth(1.f)[ MakeFlatColorBox(FLinearColor::Black) ]
+				+ SHorizontalBox::Slot().AutoWidth()[ MakeCorner() ]
+			]
+
+			+ SVerticalBox::Slot().FillHeight(1.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(MaskExtent)[ MakeFlatColorBox(FLinearColor::Black) ] ]
+				// TEMPORARY DIAGNOSTIC: bright, semi-transparent magenta instead of SNew(SSpacer),
+				// so a screenshot shows exactly where this "hole" actually lands relative to the
+				// frame border - revert to SNew(SSpacer) once the real bug is found.
+				+ SHorizontalBox::Slot().FillWidth(1.f)[ MakeFlatColorBox(FLinearColor(1.f, 0.f, 1.f, 0.5f)) ]
+				+ SHorizontalBox::Slot().AutoWidth()[ SNew(SBox).WidthOverride(MaskExtent)[ MakeFlatColorBox(FLinearColor::Black) ] ]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()[ MakeCorner() ]
+				+ SHorizontalBox::Slot().FillWidth(1.f)[ MakeFlatColorBox(FLinearColor::Black) ]
+				+ SHorizontalBox::Slot().AutoWidth()[ MakeCorner() ]
+			]
+		];
+}
+
+TSharedRef<SWidget> UViewfinderWidget::RebuildWidget()
+{
+	return SNew(SOverlay)
+
+		// The frame fills the screen at zero roll and rotates live by the camera's exact roll,
+		// rather than swapping between a fixed landscape/portrait shape - this is what makes it
+		// read as "the angle of the camera" instead of just two states, and TakePhoto rotates the
+		// captured image by the same angle so it matches. GetFrameScale shrinks it as the roll
+		// increases, so the rotated rectangle always stays fully on screen instead of its corners
+		// running off it. The mask and the frame are siblings sharing the exact same render
+		// transform, pivot and size (see GetFrameWidth/Height), so the mask's transparent window
+		// and the frame's border always land on the same rectangle - what the roll turns that
+		// rectangle away from reads as black instead of showing extra scene the photo won't capture.
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SOverlay)
+			.RenderTransform_UObject(this, &UViewfinderWidget::GetFrameRenderTransform)
+			.RenderTransformPivot(FVector2D(0.5f, 0.5f))
+
+			+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
+			[
+				MakeRotationMask()
+			]
+
+			+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride_UObject(this, &UViewfinderWidget::GetFrameWidth)
+				.HeightOverride_UObject(this, &UViewfinderWidget::GetFrameHeight)
+				[
+					MakeFrame()
+				]
 			]
 		]
 

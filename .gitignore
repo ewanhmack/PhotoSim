@@ -77,3 +77,4 @@ DerivedDataCache/*
 # Claude Code local session/settings data
 .claude/
 CLAUDE.MD
+Writeups/

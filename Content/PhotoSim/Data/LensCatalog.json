@@ -1,0 +1,17 @@
+[
+  {"focal": "14mm", "fstop": "f/1.4", "focusDistance": 0.30, "weight": 1170, "prime": true},
+  {"focal": "14-24mm", "fstop": "f/2.8", "focusDistance": 0.28, "weight": 795, "prime": false},
+  {"focal": "24mm", "fstop": "f/1.4", "focusDistance": 0.24, "weight": 445, "prime": true},
+  {"focal": "24-70mm", "fstop": "f/2.8", "focusDistance": 0.38, "weight": 886, "prime": false},
+  {"focal": "35mm", "fstop": "f/1.4", "focusDistance": 0.25, "weight": 524, "prime": true},
+  {"focal": "50mm", "fstop": "f/1.4", "focusDistance": 0.40, "weight": 905, "prime": true},
+  {"focal": "24-105mm", "fstop": "f/4", "focusDistance": 0.38, "weight": 663, "prime": false},
+  {"focal": "85mm", "fstop": "f/1.4", "focusDistance": 0.85, "weight": 820, "prime": true},
+  {"focal": "70-200mm", "fstop": "f/2.8", "focusDistance": 0.96, "weight": 1480, "prime": false},
+  {"focal": "100mm", "fstop": "f/2.8", "focusDistance": 0.30, "weight": 730, "prime": true},
+  {"focal": "100-400mm", "fstop": "f/5-6.3", "focusDistance": 1.12, "weight": 1135, "prime": false},
+  {"focal": "135mm", "fstop": "f/1.8", "focusDistance": 0.87, "weight": 1220, "prime": true},
+  {"focal": "200mm", "fstop": "f/2.8", "focusDistance": 1.70, "weight": 1480, "prime": true},
+  {"focal": "70-300mm", "fstop": "f/4.5-5.6", "focusDistance": 0.90, "weight": 710, "prime": false},
+  {"focal": "100-400mm", "fstop": "f/4.5-5.6", "focusDistance": 0.98, "weight": 1640, "prime": false}
+]
