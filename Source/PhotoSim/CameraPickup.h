@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "CameraBodyDefinition.h"
 #include "CameraPickup.generated.h"
 
 class UTP_CameraComponent;
@@ -43,7 +44,19 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera|Model")
 	TObjectPtr<UStaticMeshComponent> Screen;
 
+	/**
+	 * Per-instance body specs (sensor format, digital vs film, etc). Set in the Details panel;
+	 * OverrideMesh swaps Body's mesh in BeginPlay when set. BeginPlay only ever swaps the mesh
+	 * itself, never Body's Transform - select Body in the Components panel and tune its own
+	 * Location/Rotation/Scale by eye (same as the default SM_Camera body already is, see its own
+	 * comment in the constructor) to fit whatever OverrideMesh actually looks like.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Body")
+	FCameraBodyDefinition BodyDefinition;
+
 protected:
+	virtual void BeginPlay() override;
+
 	/**
 	 * Base material for the rear screen. Must expose a Texture Parameter named "ScreenTexture"
 	 * driving Emissive Color (Unlit, Opaque). Loaded from /Game/PhotoSim/Materials/M_CameraScreen.

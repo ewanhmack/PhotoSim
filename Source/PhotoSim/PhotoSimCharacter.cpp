@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhotoSimCharacter.h"
-#include "PhotoSimProjectile.h"
+#include "InventoryComponent.h"
+#include "StaminaComponent.h"
+#include "LensGridInventoryComponent.h"
+#include "LensJSONImporter.h"
+#include "Misc/Paths.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -42,12 +46,64 @@ APhotoSimCharacter::APhotoSimCharacter()
 	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
+
+	WeightToSpeedMultiplierCurve.EditorCurveData.AddKey(0.f, 1.f);
+	WeightToSpeedMultiplierCurve.EditorCurveData.AddKey(10.f, 1.f);
+
+	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("InventoryComponent"));
+	StaminaComponent = CreateDefaultSubobject<UStaminaComponent>(TEXT("StaminaComponent"));
+	LensInventoryComponent = CreateDefaultSubobject<ULensGridInventoryComponent>(TEXT("LensInventoryComponent"));
 }
 
 void APhotoSimCharacter::BeginPlay()
 {
-	// Call the base class  
+	// Call the base class
 	Super::BeginPlay();
+
+	InventoryComponent->OnWeightChanged.AddUObject(this, &APhotoSimCharacter::OnWeightChangedHandler);
+	StaminaComponent->OnExhausted.AddUObject(this, &APhotoSimCharacter::ForceStopSprint);
+
+	RecomputeMovementSpeed();
+	SeedStarterLens();
+}
+
+void APhotoSimCharacter::SeedStarterLens()
+{
+	// Only a single starter lens is handed to the player - the rest of the catalog is found in
+	// the world (see ALensPickup). Lives here, not on the camera, since the lens bag now persists
+	// independent of which camera (if any) is currently held.
+	const FString CatalogPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("PhotoSim/Data/LensCatalog.json"));
+
+	TArray<FLensDefinition> Catalog;
+	TArray<FString> Warnings;
+	ULensJSONImporter::ImportLensesFromFile(CatalogPath, Catalog, Warnings);
+
+	for (const FString& Warning : Warnings)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Character] Lens catalog import: %s"), *Warning);
+	}
+
+	const FLensDefinition* StandardPrime = Catalog.FindByPredicate([](const FLensDefinition& Lens)
+	{
+		return Lens.IsPrime() && FMath::IsNearlyEqual(Lens.MinFocalLengthMM, 50.f);
+	});
+
+	FLensDefinition StarterLens;
+	if (StandardPrime != nullptr)
+	{
+		StarterLens = *StandardPrime;
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Character] Lens catalog failed to load or had no 50mm prime (%s) - falling back to a hardcoded default lens."), *CatalogPath);
+		StarterLens = { FText::FromString(TEXT("24-70mm Standard Zoom")), 2.8f, 16.f, 24.f, 70.f, 4.f, 38.f };
+	}
+
+	const FGuid StarterLensId = LensInventoryComponent->AddLens(StarterLens);
+	if (StarterLensId.IsValid())
+	{
+		LensInventoryComponent->MoveLensToHotbar(StarterLensId, 0);
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////// Input
@@ -126,13 +182,41 @@ void APhotoSimCharacter::StartSprint(const FInputActionValue& Value)
 {
 	// Deliberately doesn't check crouch state: UCharacterMovementComponent::GetMaxSpeed() always
 	// uses MaxWalkSpeedCrouched instead of MaxWalkSpeed while crouched, so this can't make the
-	// player crouch-sprint even though it unconditionally sets MaxWalkSpeed.
-	GetCharacterMovement()->MaxWalkSpeed = SprintSpeed;
+	// player crouch-sprint even though RecomputeMovementSpeed unconditionally sets MaxWalkSpeed.
+	if (!StaminaComponent->CanStartSprinting())
+	{
+		return;
+	}
+
+	bWantsToSprint = true;
+	StaminaComponent->NotifySprintStarted();
+	RecomputeMovementSpeed();
 }
 
 void APhotoSimCharacter::StopSprint(const FInputActionValue& Value)
 {
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	bWantsToSprint = false;
+	StaminaComponent->NotifySprintStopped();
+	RecomputeMovementSpeed();
+}
+
+void APhotoSimCharacter::ForceStopSprint()
+{
+	bWantsToSprint = false;
+	StaminaComponent->NotifySprintStopped();
+	RecomputeMovementSpeed();
+}
+
+void APhotoSimCharacter::RecomputeMovementSpeed()
+{
+	const float Mult = WeightToSpeedMultiplierCurve.GetRichCurveConst()->Eval(InventoryComponent->GetTotalWeightKG());
+	GetCharacterMovement()->MaxWalkSpeed = (bWantsToSprint ? SprintSpeed : WalkSpeed) * Mult;
+	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed * Mult;
+}
+
+void APhotoSimCharacter::OnWeightChangedHandler(float NewTotalWeightKG)
+{
+	RecomputeMovementSpeed();
 }
 
 void APhotoSimCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)

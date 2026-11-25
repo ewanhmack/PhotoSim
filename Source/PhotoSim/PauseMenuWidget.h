@@ -4,17 +4,19 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Types/SlateStructs.h"
 #include "PauseMenuWidget.generated.h"
 
 class SWidgetSwitcher;
-class SWrapBox;
+class SScrollBox;
 struct FSlateBrush;
+class UPhotoLibrarySubsystem;
 
 /**
- * Pause menu with Resume / Gallery / Quit, built entirely in C++ via Slate. The gallery and the
- * enlarged photo view are further "pages" within the same widget (swapped via an
- * SWidgetSwitcher): a scrollable grid of thumbnails, camera-roll style, and clicking one swaps
- * to a large view of that photo.
+ * Pause menu with Resume / Gallery / Quit, built entirely in C++ via Slate. The gallery is a
+ * camera-style playback page (swapped in via an SWidgetSwitcher): one photo on screen at a time,
+ * with a filmstrip to jump between shots and the settings it was taken with read off as an
+ * overlay - the shape of a real camera's rear LCD review mode, not a flat thumbnail grid.
  */
 UCLASS()
 class PHOTOSIM_API UPauseMenuWidget : public UUserWidget
@@ -27,25 +29,46 @@ public:
 
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
+	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 
 private:
 	TSharedRef<SWidget> MakeMenuButton(const FString& Label, FOnClicked OnClicked) const;
+	UPhotoLibrarySubsystem* GetPhotoLibrary() const;
 	void RefreshGallery();
-	const FSlateBrush* GetEnlargedBrush() const;
+	void StepPhoto(int32 Direction);
+
+	const FSlateBrush* GetCurrentBrush() const;
+
+	/** Fits the current photo's own size within a bounding box so a portrait photo displays tall rather than stretched into a landscape frame */
+	FOptionalSize GetPhotoWidthOverride() const;
+	FOptionalSize GetPhotoHeightOverride() const;
+
+	FText GetPhotoCounterText() const;
+	FText GetPhotoSettingsText() const;
+	FText GetFavoriteButtonLabel() const;
+	FSlateColor GetFavoriteButtonColor() const;
+	FText GetDeleteButtonLabel() const;
+	EVisibility GetEmptyLibraryTextVisibility() const;
 
 	FReply OnResumeClicked();
 	FReply OnGalleryClicked();
 	FReply OnQuitClicked();
 	FReply OnBackClicked();
 	FReply OnThumbnailClicked(int32 PhotoIndex);
-	FReply OnBackFromEnlargedClicked();
+	FReply OnPrevClicked();
+	FReply OnNextClicked();
+	FReply OnFavoriteClicked();
+	FReply OnDeleteClicked();
 
 	TSharedPtr<SWidgetSwitcher> Switcher;
-	TSharedPtr<SWrapBox> GalleryWrapBox;
+	TSharedPtr<SScrollBox> FilmstripBox;
 
-	/** Keeps the brushes referencing each photo's render target alive while the gallery is shown */
+	/** Keeps a brush alive per photo, in the same order as UPhotoLibrarySubsystem::GetPhotos(), for as long as the gallery page holds it */
 	TArray<TSharedPtr<FSlateBrush>> GalleryBrushes;
 
-	/** Which brush the enlarged-view page currently shows */
-	TSharedPtr<FSlateBrush> EnlargedBrush;
+	/** Index into the library's Photos array (and GalleryBrushes) the playback page is currently showing */
+	int32 CurrentPhotoIndex = 0;
+
+	/** Armed by one click on Delete, cleared by navigating or confirming - stops a single misclick from permanently deleting a photo */
+	bool bConfirmingDelete = false;
 };

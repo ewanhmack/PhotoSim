@@ -23,6 +23,14 @@ public:
 	FOnPickUp OnPickUp;
 
 	UTP_PickUpComponent();
+
+	/**
+	 * Call this from an OnPickUp handler that actually consumed the pickup, to stop listening for
+	 * further overlaps. Skip it if the handler declined (e.g. no camera equipped yet to add a lens
+	 * to) and the pickup should stay collectible - overlapping again will re-broadcast OnPickUp.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	void ConsumePickup();
 protected:
 
 	/** Called when the game starts */
