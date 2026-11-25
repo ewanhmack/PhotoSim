@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
 #include "LensDefinition.h"
+#include "CameraBodyDefinition.h"
 #include "TP_CameraComponent.generated.h"
 
 class APhotoSimCharacter;
@@ -12,7 +13,8 @@ class UInputAction;
 class UInputMappingContext;
 class UUserWidget;
 class UCameraShutterWidget;
-class ULensInventoryWidget;
+class ULensGridInventoryComponent;
+class UExposureModeToastWidget;
 class UAnimMontage;
 class USoundBase;
 class USceneCaptureComponent2D;
@@ -21,6 +23,16 @@ class UStaticMeshComponent;
 class UMaterialInterface;
 struct FInputActionValue;
 struct FPostProcessSettings;
+
+UENUM(BlueprintType)
+enum class ECameraExposureMode : uint8
+{
+	Manual,
+	AperturePriority,
+	ShutterPriority,
+	ISOPriority,
+	Auto
+};
 
 /**
  * Handheld, pickup-able camera logic and rig. This component is purely the "brain" of the
@@ -69,6 +81,14 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Camera")
 	float GetISO() const { return ISO; }
+
+	/** Whatever the autofocus raycast is currently resting on - this is what TakePhoto attributes a shot to for UPhotoSubjectComponent purposes */
+	UFUNCTION(BlueprintPure, Category = "Camera")
+	AActor* GetFocusedActor() const { return FocusedActor.Get(); }
+
+	/** Applies a camera body's sensor format, medium (digital/film), and weight; starts a fresh film roll if the body is Film. Called by ACameraPickup once attached. */
+	UFUNCTION(BlueprintCallable, Category = "Camera")
+	void ConfigureFromBodyDefinition(const FCameraBodyDefinition& InBodyDefinition);
 
 	/**
 	 * Wires up the live-view screen on the back of the body: a scene capture positioned at the
@@ -124,24 +144,49 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Camera|Zoom")
 	float GetFOVForFocalLengthMM(float FocalLengthMM) const;
 
+	// --- Roll (portrait/landscape) ---
+	// Scroll while holding the Roll modifier freely rotates the camera by RollStepDegrees a
+	// notch. Unlike every other hold+scroll modifier, this one also works at hip (not just while
+	// aiming) - you can twist the camera in your hands before raising it to your eye. TickComponent
+	// composes this onto the hip/viewfinder pose using the same Slerp already driving that blend.
+	//
+	// The photo follows the exact continuous angle too, not a landscape/portrait snap - the
+	// viewfinder overlay (see ViewfinderWidget) tilts live by this same value, and TakePhoto
+	// rotates the captured image by it (expanding the canvas rather than cropping, see
+	// ImageRotation.h), so an in-between angle genuinely comes out as a tilted photo, the same
+	// way rotating a real camera to an arbitrary angle does.
+
+	/** Free continuous roll in degrees about the lens axis, wrapped to [0, 360) */
+	UPROPERTY(BlueprintReadOnly, Category = "Camera|Roll")
+	float CurrentRollDegrees = 0.f;
+
+	/** How many degrees one scroll notch adds/subtracts while holding the Roll modifier */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Roll")
+	float RollStepDegrees = 5.f;
+
+	/** CurrentRollDegrees, for readouts/overlays that just want the raw continuous value */
+	UFUNCTION(BlueprintPure, Category = "Camera|Roll")
+	float GetRollDegrees() const;
+
+	/**
+	 * 1 at zero roll, shrinking as the roll increases - the largest scale a ViewportSize-shaped
+	 * rectangle can be scaled by and still fit entirely within ViewportSize once rotated by
+	 * RollDegrees, rather than letting its corners run off screen. Feed this into a viewfinder
+	 * overlay's Render Scale (both axes) alongside RollDegrees driving its Render Transform Angle.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Camera|Roll")
+	static float GetFrameScaleForRoll(float RollDegrees, FVector2D ViewportSize);
+
 	// --- Lenses ---
+	// Ownership lives on the character's ULensGridInventoryComponent, not here - lenses survive a
+	// camera swap. This component just mirrors whichever lens is in the inventory's active hotbar
+	// slot onto its own live dials; see HandleActiveLensChanged / ApplyActiveLensFromInventory.
 
-	/** Every lens the player currently has. Index 0 is equipped by default. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Lenses")
-	TArray<FLensDefinition> AvailableLenses;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Camera|Lenses")
-	int32 EquippedLensIndex;
-
-	/** Swaps to AvailableLenses[LensIndex]: applies its aperture/focal length range, clamps current Aperture into it, resets zoom to 0 */
-	UFUNCTION(BlueprintCallable, Category = "Camera|Lenses")
-	void EquipLens(int32 LensIndex);
-
-	/** Toggles the lens-picker UI. Works any time the camera is equipped, not just while aiming. */
+	/** Toggles the lens grid/hotbar UI. Works any time the camera is equipped, not just while aiming. */
 	UFUNCTION(BlueprintCallable, Category = "Camera|Lenses")
 	void ToggleLensInventory();
 
-	/** Optional widget class for the lens inventory. Defaults to ULensInventoryWidget if left empty. */
+	/** Optional widget class for the lens inventory. Defaults to ULensGridInventoryWidget if left empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Lenses")
 	TSubclassOf<UUserWidget> LensInventoryWidgetClass;
 
@@ -242,6 +287,87 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
 	float ExposureCompensationEV;
 
+	/**
+	 * Extra EV added only on top of PhotoCapture/LensCapture, on top of ExposureCompensationEV -
+	 * a USceneCaptureComponent2D reads back measurably darker than the real viewport even with
+	 * otherwise identical post process settings (confirmed by comparing a capture's render target
+	 * against a direct readback of the game viewport backbuffer; the exact engine-internal cause
+	 * wasn't pinned down). This is a measured correction, not a derived one - re-measure and
+	 * adjust if the gap changes with scene/lighting.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
+	float CaptureExposureCompensationEV = 0.65f;
+
+	// --- Exposure mode ---
+	// Manual leaves Aperture/ShutterSpeed/ISO exactly as today. Every other mode solves whichever
+	// stat isn't user-fixed against TargetEV using the same physical EV formula ApplyExposureSettings
+	// already assumes (EV = log2(N^2 * shutter_denominator) - log2(ISO/100)), rather than switching to
+	// UE's built-in auto-exposure - that path never gets time to adapt for an occasional capture, which
+	// is exactly the reason ApplyExposureSettings exists in the first place (see its own comment).
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera|Exposure")
+	ECameraExposureMode ExposureMode = ECameraExposureMode::Manual;
+
+	/** The EV solved toward in any non-Manual mode. Recalibrated from the current Aperture/ShutterSpeed/ISO every time Manual is left, so entering Auto or a priority mode never jumps brightness on the first frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Exposure")
+	float TargetEV;
+
+	/** Cycles Manual -> Aperture/Shutter/ISO Priority -> Auto -> Manual. Direction +1 forward, -1 backward. Shows an on-screen toast naming the new mode. */
+	UFUNCTION(BlueprintCallable, Category = "Camera|Exposure")
+	void CycleExposureMode(int32 Direction = 1);
+
+	// --- Pure exposure/roll math, exposed as static so it's testable without a live component ---
+
+	/** EV = log2(N^2 * shutter_denominator) - log2(ISO/100) - the same physical relationship ApplyExposureSettings assumes */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	static float ComputeExposureEV(float ApertureFNumber, float ShutterSpeedDenominator, float ISOValue);
+
+	/** Solves the shutter speed denominator that hits TargetEVValue given a fixed Aperture and ISO */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	static float SolveShutterSpeedForEV(float ApertureFNumber, float ISOValue, float TargetEVValue);
+
+	/** Solves the aperture f-number that hits TargetEVValue given a fixed shutter speed denominator and ISO */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	static float SolveApertureForEV(float ShutterSpeedDenominator, float ISOValue, float TargetEVValue);
+
+	/** Solves the ISO that hits TargetEVValue given a fixed Aperture and shutter speed denominator */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	static float SolveISOForEV(float ApertureFNumber, float ShutterSpeedDenominator, float TargetEVValue);
+
+	/** Steps Current by Direction through the 5 exposure modes, wrapping at either end */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	static ECameraExposureMode GetNextExposureMode(ECameraExposureMode Current, int32 Direction);
+
+	/** Wraps any degree value into [0, 360) */
+	UFUNCTION(BlueprintPure, Category = "Camera|Roll")
+	static float NormalizeRollDegrees(float Degrees);
+
+	/** "Manual" / "Aperture Priority" / etc - the current ExposureMode as display text. Public and Blueprint-bindable so a Designer-built HUD (e.g. a WBP_Viewfinder with its own widget tree) can bind a Text block straight to it, same as the other camera readouts on UViewfinderWidget. */
+	UFUNCTION(BlueprintPure, Category = "Camera|Exposure")
+	FText GetExposureModeDisplayText() const;
+
+	/** Optional widget class for the exposure-mode-change toast. Defaults to UExposureModeToastWidget if left empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Feedback")
+	TSubclassOf<UUserWidget> ExposureModeToastWidgetClass;
+
+	// --- Camera body (format / film) ---
+	// Set via ConfigureFromBodyDefinition, called by ACameraPickup once attached. SensorWidthMM
+	// above is kept in sync with CurrentBodyDefinition.SensorWidthMM at the same time, since it's
+	// what GetFOVForFocalLengthMM already reads - full-frame/APS-C crop factor falls out of that
+	// existing formula for free, no new FOV calculation needed.
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera Body")
+	FCameraBodyDefinition CurrentBodyDefinition;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera Body")
+	int32 ShotsTakenOnRoll = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera Body")
+	bool bRollComplete = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Camera Body")
+	FGuid CurrentRollId;
+
 	// --- Behaviour / feedback ---
 
 	/** If true, TakePhoto only works while looking through the viewfinder */
@@ -320,8 +446,23 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> OpenLensInventoryAction;
 
+	/** Hold (Alt) + scroll: step the roll orientation instead of zooming */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> RollModifierAction;
+
+	/** Hold (M) + scroll: cycle exposure mode instead of zooming */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> ExposureModeModifierAction;
+
+	/** 1/2/3: switch which hotbar slot is the active lens. Null (and unbound) until the matching Input Action assets are created in-editor - see the project notes. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> HotbarSlot1Action;
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> HotbarSlot2Action;
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> HotbarSlot3Action;
+
 protected:
-	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -337,12 +478,34 @@ protected:
 	void Input_FocusModifierStarted(const FInputActionValue& Value);
 	void Input_FocusModifierCompleted(const FInputActionValue& Value);
 	void Input_OpenLensInventory(const FInputActionValue& Value);
+	void Input_RollModifierStarted(const FInputActionValue& Value);
+	void Input_RollModifierCompleted(const FInputActionValue& Value);
+	void Input_ExposureModeModifierStarted(const FInputActionValue& Value);
+	void Input_ExposureModeModifierCompleted(const FInputActionValue& Value);
+	void Input_HotbarSlot1(const FInputActionValue& Value);
+	void Input_HotbarSlot2(const FInputActionValue& Value);
+	void Input_HotbarSlot3(const FInputActionValue& Value);
 
-	/** Applies Aperture/ShutterSpeed/ISO as a fixed Manual exposure (plus DOF/motion blur/grain) onto a post process settings struct */
-	void ApplyExposureSettings(FPostProcessSettings& PPS) const;
+	/** Applies Aperture/ShutterSpeed/ISO as a fixed Manual exposure (plus DOF/motion blur/grain) onto a post process settings struct. Pass bIsSceneCapture=true for PhotoCapture/LensCapture to also apply CaptureExposureCompensationEV. */
+	void ApplyExposureSettings(FPostProcessSettings& PPS, bool bIsSceneCapture = false) const;
+
+	/** Engine default is to disable Lumen GI/Reflections on every scene capture (SceneCaptureRendering.cpp) regardless of the main view's project settings - re-enables it so PhotoCapture/LensCapture match what the player actually sees instead of reading indirectly-lit areas back crushed to black */
+	static void ApplyCaptureLumenOverride(FPostProcessSettings& PPS);
 
 	/** Raycasts from the lens through the centre of frame and sets FocalDistance to the hit distance */
 	void UpdateAutoFocus();
+
+	/** In any non-Manual exposure mode, solves whichever stat isn't user-fixed to hit TargetEV */
+	void UpdateAutoExposure();
+
+	/** The character's lens bag, or nullptr if no character is attached yet */
+	ULensGridInventoryComponent* GetLensInventory() const;
+
+	/** Copies whichever lens is in the inventory's active hotbar slot onto this camera's live dials. No-op if that slot is empty - the camera just keeps whatever dials it already has. */
+	void ApplyActiveLensFromInventory();
+
+	void HandleActiveLensChanged(FGuid NewActiveLensId);
+	void SetActiveHotbarSlotFromInput(int32 SlotIndex);
 
 private:
 	UPROPERTY(Transient)
@@ -356,6 +519,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UUserWidget> LensInventoryWidgetInstance;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UExposureModeToastWidget> ExposureModeToastWidgetInstance;
 
 	/** Created lazily in AttachCamera, attached to the player's first person camera */
 	UPROPERTY(Transient)
@@ -375,5 +541,13 @@ private:
 	bool bShutterSpeedModifierHeld = false;
 	bool bISOModifierHeld = false;
 	bool bFocusModifierHeld = false;
+	bool bRollModifierHeld = false;
+	bool bExposureModeModifierHeld = false;
 	bool bIsLensInventoryOpen = false;
+
+	/** Updated every tick in UpdateAutoFocus from the centre-frame line trace */
+	TWeakObjectPtr<AActor> FocusedActor;
+
+	void RefreshCarriedWeight();
+	void ShowExposureModeToast();
 };

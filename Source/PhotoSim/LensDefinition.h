@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/StaticMesh.h"
 #include "LensDefinition.generated.h"
 
 /**
@@ -50,4 +51,30 @@ struct FLensDefinition
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
 	float MinFocusDistanceCM = 30.f;
+
+	/** Widest possible aperture at MinFocalLengthMM. Equal to WideOpenApertureAtMaxFocalLength for a prime or a constant-aperture zoom. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	float WideOpenApertureAtMinFocalLength = 2.8f;
+
+	/** Widest possible aperture at MaxFocalLengthMM. Equal to WideOpenApertureAtMinFocalLength for a prime or a constant-aperture zoom. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	float WideOpenApertureAtMaxFocalLength = 2.8f;
+
+	/** Physical weight of this lens, for the carry-weight system. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	float WeightKG = 0.5f;
+
+	/** Set only when this lens should override the default placeholder mesh. Left unset for the whole JSON catalog - no individual lens models exist yet, so ALensPickup falls back to a cylinder sized by focal length. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens")
+	TSoftObjectPtr<UStaticMesh> OverrideMesh;
+
+	/** How many cells wide this lens occupies in the grid inventory. See ULensJSONImporter::ComputeGridFootprint for how the JSON catalog derives this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens|Inventory")
+	int32 GridWidth = 1;
+
+	/** How many cells tall this lens occupies in the grid inventory. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lens|Inventory")
+	int32 GridHeight = 1;
+
+	bool IsPrime() const { return FMath::IsNearlyEqual(MinFocalLengthMM, MaxFocalLengthMM); }
 };

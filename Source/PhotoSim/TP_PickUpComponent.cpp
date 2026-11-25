@@ -22,10 +22,14 @@ void UTP_PickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedCo
 	APhotoSimCharacter* Character = Cast<APhotoSimCharacter>(OtherActor);
 	if(Character != nullptr)
 	{
-		// Notify that the actor is being picked up
+		// Notify that the actor is being picked up. Does NOT unregister itself here - a handler
+		// that declines the pickup (see ConsumePickup's own comment) needs overlapping again to
+		// still re-trigger this.
 		OnPickUp.Broadcast(Character);
-
-		// Unregister from the Overlap Event so it is no longer triggered
-		OnComponentBeginOverlap.RemoveAll(this);
 	}
+}
+
+void UTP_PickUpComponent::ConsumePickup()
+{
+	OnComponentBeginOverlap.RemoveAll(this);
 }
